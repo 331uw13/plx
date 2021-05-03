@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <assert.h>
 //#include <sys/epoll.h>
 #include <termios.h>
 #include <linux/fb.h>
@@ -20,51 +21,11 @@
 
 #include "plx.h"
 
-struct __fbuffer {
-    int fd;
-    u32 w;
-    u32 h;
-    u64 size;
-    col_t* data;
-    col_t* swap_data;
-} static fbuffer;
 
 static struct termios termios_old_mode;
 
-static int mouse_fd;
-static int plx_status;
-static col_t plx_current_color;
-static col_t plx_current_clear_color;
-static u16 plx_line_spacing;
-
-
-// TODO: move "private" functions to bottom of the file.
-
-
-// TODO: use this:
-u8 plx_alloc_mem(void** p, u64 size) {
-    u8 result = 0;
-    if(p != NULL) {
-        *p = malloc(size);
-        if(*p == NULL) {
-            fprintf(stderr, "Failed to allocate memory for %li bytes\nerrno: %i\n", size, errno);
-            if(errno == ENOMEM) {
-                fprintf(stderr, "Out of memory!\n");
-            }
-        }
-        else {
-            result = 1;
-        }
-    }
-    return result;
-}
-
-col_t plx_rgb(u8 r, u8 g, u8 b) {
-    return (r << 16) | (g << 8) | (b << 0) | (0x00 << 24);
-}
-
-void memset32b(void* dest, u32 data, u32 size) {
-	for(u32 i = 0; i < size; i += sizeof data) {
+void memset_col(void* dest, col_t data, u32 count) {
+	for(u32 i = 0; i < count; i += sizeof data) {
 		memmove(((char*)dest)+i, &data, sizeof data);
 	}
 }
@@ -72,131 +33,136 @@ void memset32b(void* dest, u32 data, u32 size) {
 // -------------------------------
 
 
-int plx_getstatus() {
-    return plx_status;
-}
 
-void plx_hint(u32 hint) {
-	plx_status |= hint;
-}
+u8 plx_open(char* path, struct plx_fb* fb) {
+	assert(fb != NULL);
+	u8 res = 0;
 
-void plx_delay(u32 ms) {
-    usleep(ms * 1000);
-}
+    fb->fd = open(path, O_RDWR);
+	if(fb->fd < 0) {
+		fprintf(stderr, "Failed to open \"%s\".\nerrno: %i\n", path, errno);
+		perror("open");
+		goto finish;
+	}
 
-void plx_init() {
-    plx_status = 0;
-    mouse_fd = -1;
-    fbuffer.fd = -1;
-    fbuffer.data = NULL;
-	fbuffer.swap_data = NULL;
-
-    plx_line_spacing = 1;
-
-    fbuffer.fd = open(FRAMEBUFFER_DEVICE, O_RDWR);
-    if(fbuffer.fd < 0) {
-        perror("open");
-        fprintf(stderr, "Failed to open \"%s\"\nerrno: %i\n", FRAMEBUFFER_DEVICE, errno);
-        plx_status |= PLX_ERR;
-        return;
-    }
-
-    mouse_fd = open(MOUSEINPUT_DEVICE, O_RDONLY | O_NONBLOCK);
-    if(mouse_fd < 0) {
-        perror("open");
-        fprintf(stderr, "Failed to open \"%s\"\nerrno: %i\n", MOUSEINPUT_DEVICE, errno);
-        plx_status |= PLX_ERR;
-        return;
-    }
-
-    struct fb_var_screeninfo si;
-    ioctl(fbuffer.fd, FBIOGET_VSCREENINFO, &si);
-    fbuffer.w = si.xres;
-    fbuffer.h = si.yres;
-
+	struct fb_var_screeninfo si;
     struct fb_fix_screeninfo fsi;
-    ioctl(fbuffer.fd, FBIOGET_FSCREENINFO, &fsi);
-    fbuffer.size = fsi.smem_len;
+    
+	ioctl(fb->fd, FBIOGET_VSCREENINFO, &si);
+	fb->width = si.xres;
+    fb->height = si.yres;
 
-    const int prot = PROT_READ | PROT_WRITE;
-    const int flags = MAP_SHARED;
+    ioctl(fb->fd, FBIOGET_FSCREENINFO, &fsi);
+    fb->size = fsi.smem_len;
 
-    fbuffer.data = mmap(NULL, fbuffer.size, prot, flags, fbuffer.fd, 0);
-    if(fbuffer.data == NULL || fbuffer.data == MAP_FAILED) {
-        perror("mmap");
-        fprintf(stderr, "Failed to map device \"%s\"\nerrno: %i\n", FRAMEBUFFER_DEVICE, errno);
-        plx_status |= PLX_ERR;
-        return;
-    }
-
-	if(!plx_alloc_mem((void*)&fbuffer.swap_data, fbuffer.size)) {
-        plx_status |= PLX_ERR;
-        return;
+    fb->data = mmap(NULL, fb->size, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
+	if(fb->data == MAP_FAILED || fb->data == NULL) {
+		fprintf(stderr, "Failed to map \"%s\" into memory.\nerrno: %i\n", path, errno);
+		perror("mmap");
+		goto finish;
 	}
 
-	// Set cursor to be invisible.
-	write(0, "\033[?25l", 6);
+	write(0, "\033[?25l", 6);          // Set cursor to be invisible.
+	
+	tcgetattr(0, &termios_old_mode);   // Save current.
+	struct termios raw_mode;
+	cfmakeraw(&raw_mode);
+	tcsetattr(0, TCSANOW, &raw_mode);
 
-	if(!(plx_status & PLX_NO_RAWMODE)) {
-		tcgetattr(0, &termios_old_mode);
-		struct termios raw_mode;
-		cfmakeraw(&raw_mode);
-		tcsetattr(0, TCSANOW, &raw_mode);
-	}
-   
-	if(plx_status & PLX_STDIN_NO_BLOCK) {
-		fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
-	}
+	res = 1;
 
-	plx_color(255, 255, 255);
-	plx_clear_color(0, 0, 0);
+finish:
+	return res;
 }
 
-void plx_exit() {
-	// Set cursor to be visible.
-	write(0, "\033[?25h", 6);
-   
-	if(!(plx_status & PLX_NO_RAWMODE)) {
+void plx_close(struct plx_fb* fb) {
+	if(fb != NULL) {
+		write(0, "\033[?25h", 6);   // Set cursor to be visible.
+		munmap(fb->data, fb->size);
+		close(fb->fd);
 		tcsetattr(0, TCSANOW, &termios_old_mode);
 	}
+}
 
-    if(fbuffer.data != NULL) {
-        munmap(fbuffer.data, fbuffer.size);
+void plx_set_flag(u32 flag, u8 b) {
+	switch(flag) {
+		
+		case PLX_STDIN_NONBLOCK:
+			fcntl(0, F_SETFL, b ? 
+					fcntl(0, F_GETFL) | O_NONBLOCK :
+					fcntl(0, F_GETFL) & ~O_NONBLOCK);
+			break;
+
+		default: break;
+	}
+}
+
+void plx_clear(struct plx_fb* fb) {
+	if(fb != NULL) {
+		memset_col(fb->data, fb->clear_color, fb->size);
+	}
+}
+
+void plx_clear_region(struct plx_fb* fb, u32 x, u32 y, u32 w, u32 h) {
+	if(fb != NULL && x+w <= fb->width && y+h <= fb->height) {
+		for(u32 i = y; i < y+h; i++) {
+			memset_col(fb->data + i * fb->width + x, fb->clear_color, w * sizeof(col_t));
+		}
+	}
+}
+
+void plx_draw_pixel(struct plx_fb* fb, u32 x, u32 y) {
+	if(fb != NULL && x <= fb->width && y <= fb->height) {
+		const u32 i = y * fb->width + x;
+		fb->data[i] = fb->draw_color;
+	}
+}
+
+void plx_draw_region(struct plx_fb* fb, u32 x, u32 y, u32 w, u32 h) {
+	if(fb != NULL && x+w <= fb->width && y+h <= fb->height) {
+		for(u32 i = y; i < y+h; i++) {
+			memset_col(fb->data + i * fb->width + x, fb->draw_color, w * sizeof(col_t));
+		}
+	}
+}
+
+void plx_draw_line(struct plx_fb* fb, u32 x0, u32 y0, u32 x1, u32 y1) {
+    int width = x1 - x0;
+    int height = y1 - y0;
+    int dx0 = 0;
+    int dy0 = 0;
+    int dx1 = 0;
+    int dy1 = 0;
+
+    dx1 = dx0 = (width < 0) ? -1 : 1;
+    dy0 = (height < 0) ? -1 : 1;
+
+    int aw = abs(width);
+    int ah = abs(height);
+    int longest = aw;
+    int shortest = ah;
+    
+    if(longest < shortest) {
+        longest = ah;
+        shortest = aw;
+        dy1 = (height < 0) ? -1 : 1;
+        dx1 = 0;
     }
-    if(fbuffer.swap_data != NULL) {
-        free(fbuffer.swap_data);
-    }
-    if(fbuffer.fd >= 0) {
-        close(fbuffer.fd);
-    }
-    if(mouse_fd >= 0) {
-        close(mouse_fd);
-    }
 
-    puts("bye.");
-}
+    int numerator = longest >> 1;
 
-void plx_getres(u32* x, u32* y) {
-    *x = fbuffer.w;
-    *y = fbuffer.h;
-}
-
-void plx_color(u8 r, u8 g, u8 b) {
-    plx_current_color = plx_rgb(r, g, b);
-}
-
-void plx_clear_color(u8 r, u8 g, u8 b) {
-    plx_current_clear_color = plx_rgb(r, g, b);
-}
-
-void plx_set_line_space(u16 space) {
-    plx_line_spacing = space;
-}
-
-void plx_swap_buffers() {
-    if(fbuffer.data != NULL && fbuffer.swap_data != NULL) {
-        memmove(fbuffer.data, fbuffer.swap_data, fbuffer.size);	
-		memset32b(fbuffer.swap_data, plx_current_clear_color, fbuffer.size);
+    for(int i = 0; i < longest; i++) {
+        plx_draw_pixel(fb, x0, y0);
+        numerator += shortest;
+        if(numerator > longest) {
+            numerator -= longest;
+            x0 += dx0;
+            y0 += dy0;
+        }
+        else {
+            x0 += dx1;
+            y0 += dy1;
+        }
     }
 }
 
@@ -234,15 +200,16 @@ void plx_load_font(const char* filename, struct plx_font* font) {
         return;
 	}
 
-    font->data_size = /* num of chars */256 * font->header.height;
-    if(!plx_alloc_mem((void*)&font->data, font->data_size)) {
+    font->data_size = 256 * font->header.height;
+    font->data = malloc(font->data_size);
+	if(font->data == NULL) {
         gzclose(file);
         return;
     }
     
 	font->scale = 1;
     font->spacing = 0;
-	font->tabwidth = 4;
+	font->tab_width = 4;
 
     gzfread(font->data, font->data_size, 1, file);
     gzclose(file);
@@ -255,88 +222,14 @@ void plx_unload_font(struct plx_font* font) {
     }
 }
 
-void plx_draw_pixel(u32 x, u32 y) {
-    if(fbuffer.data == NULL) { return; }
-
-    const u32 index = y * fbuffer.w + x;
-    if(index < fbuffer.size / sizeof(col_t)) {
-        fbuffer.swap_data[index] = plx_current_color;
-    }
-    
-}
-
-void plx_draw_rect(u32 x, u32 y, u32 w, u32 h) {
-    if(fbuffer.data == NULL) { return; }
-    const u32 index = y * fbuffer.w + x;
-    if(index < fbuffer.size) {
-        for(int j = y; j < y+h; j++) {
-            for(int i = x; i < x+w; i++) {
-                plx_draw_pixel(i, j);
-            }
-        }
-    }
-}
-
-void plx_draw_rect_hollow(u32 x, u32 y, u32 w, u32 h, u32 tx, u32 ty) {
-	plx_draw_rect(x, y, w, ty);         // left top  -->  right top
-	plx_draw_rect(x, y, tx, h);         // left top  -->  left down
-	plx_draw_rect(x+w, y, tx, h);       // right top -->  right down
-	plx_draw_rect(x, y+h, w+tx, ty);    // left down -->  right down
-}
-
-void plx_draw_line(u32 x0, u32 y0, u32 x1, u32 y1) { 
-    int width = x1 - x0;
-    int height = y1 - y0;
-    int dx0 = 0;
-    int dy0 = 0;
-    int dx1 = 0;
-    int dy1 = 0;
-
-    dx1 = dx0 = (width < 0) ? -1 : 1;
-    dy0 = (height < 0) ? -1 : 1;
-
-    int aw = abs(width);
-    int ah = abs(height);
-    int longest = aw;
-    int shortest = ah;
-    
-    if(longest < shortest) {
-        longest = ah;
-        shortest = aw;
-        dy1 = (height < 0) ? -1 : 1;
-        dx1 = 0;
-    }
-
-    int numerator = longest >> 1;
-
-    dx0 *= plx_line_spacing;
-    dy0 *= plx_line_spacing;
-    dx1 *= plx_line_spacing;
-    dy1 *= plx_line_spacing;
-
-    for(int i = 0; i < longest / plx_line_spacing; i++) {
-        plx_draw_pixel(x0, y0);
-        numerator += shortest;
-        if(numerator > longest) {
-            numerator -= longest;
-            x0 += dx0;
-            y0 += dy0;
-        }
-        else {
-            x0 += dx1;
-            y0 += dy1;
-        }
-    }
-}
-
-void plx_draw_char(u32 x, u32 y, char c, struct plx_font* font) {
-    if(font == NULL || font->data == NULL) { return; }
-    u32 origin_x = x;
+void plx_draw_char(struct plx_fb* fb, u32 x, u32 y, char c, struct plx_font* font) {
+    if(font == NULL || font->data == NULL || c == 0) { return; }
+	u32 origin_x = x;
 	for(u8 i = 0; i < font->header.height; i++) {
         u8 g = font->data[c * font->header.height + i];
         for(u8 j = 0; j < 8; j++) {
             if(g & 0x80) {
-                plx_draw_rect(x, y, font->scale, font->scale);
+                plx_draw_region(fb, x, y, font->scale, font->scale);
             }
             g = g << 1;
             x += font->scale;
@@ -346,63 +239,27 @@ void plx_draw_char(u32 x, u32 y, char c, struct plx_font* font) {
     }
 }
 
-void plx_draw_text(u32 x, u32 y, char* text, u32 size, struct plx_font* font) {
+void plx_draw_text(struct plx_fb* fb, char* text, u32 size, u32 x, u32 y, struct plx_font* font) {
     if(font == NULL) { return; }
 	const u32 xorigin = x;
     const u32 xoff = (font->header.width + font->spacing) * font->scale;
     const u32 yoff = (font->header.height + font->spacing) * font->scale;
     for(u32 i = 0; i < size; i++) {
 		const char c = text[i];
-		if(c >= 0x20 && c < 0x7F) { 
-   			plx_draw_char(x, y, text[i], font);
+		if(c > 0x1F && c < 0x7F) {
+   			plx_draw_char(fb, x, y, text[i], font);
         	x += xoff;
 		}
 		else {
-			if(c == 0xA) { // new line
+			if(c == '\n') {
 				y += yoff;
 				x = xorigin;
 			}
-			else if(c == 0x9) { // tab
-				x += xoff * font->tabwidth;
+			else if(c == '\t') {
+				x += xoff * font->tab_width;
 			}
 		}
     }
-}
-
-void plx_mouseinput(u32 flag, ...) {
-
-    struct input_event e;
-    if(read(mouse_fd, &e, sizeof e) < 0) {
-        return;
-    }
-
-    u8* data = (u8*)&e;
-
-    va_list args;
-    va_start(args, flag);
-
-    if(flag & PLX_MOUSEPOS) {
-        int x = (int)data[1];
-        int y = (int)data[2];
-        if(x > 0xFF / 2) {
-            x -= 0xFF;
-        }
-        if(y > 0xFF / 2) {
-            y -= 0xFF;
-        }
-        *va_arg(args, int*) = x * 0.3;
-        *va_arg(args, int*) = y * 0.3;
-    }
-
-    if(flag & PLX_MOUSECLICK_LEFT) {
-        *va_arg(args, int*) = data[0] & 0x1;
-    }
-    
-    if(flag & PLX_MOUSECLICK_RIGHT) {
-        *va_arg(args, int*) = !!(data[0] & 0x2);
-    }
-
-    va_end(args);
 }
 
 u8 plx_keyinput() {
@@ -411,4 +268,6 @@ u8 plx_keyinput() {
     return c;
 }
 
-
+void plx_delay(u32 ms) {
+    usleep(ms * 1000);
+}

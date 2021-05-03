@@ -1,27 +1,14 @@
 #ifndef PLX_H
 #define PLX_H
 
-#include <math.h>
-
-#define FRAMEBUFFER_DEVICE "/dev/fb0"
-#define MOUSEINPUT_DEVICE "/dev/input/mouse0"
-
-#define PLX_STARTED (1<<0)
-#define PLX_ERR (1<<1)
-#define PLX_MOUSEPOS (1<<2)
-#define PLX_MOUSECLICK_LEFT (1<<3)
-#define PLX_MOUSECLICK_RIGHT (1<<4)
-#define PLX_STDIN_NO_BLOCK (1<<5)      // block when reading input?
-#define PLX_NO_RAWMODE (1<<7)            // set raw mode?
-
 #define PSF2_MAGIC 0x72b54a86
 
 
-typedef unsigned long int u64;
-typedef unsigned int u32;
-typedef unsigned short u16;
-typedef unsigned char u8;
-typedef u32 col_t;
+typedef unsigned long int   u64;
+typedef unsigned int        u32;
+typedef unsigned short      u16;
+typedef unsigned char       u8;
+typedef u32                 col_t;
 
 
 struct psf2header {
@@ -39,34 +26,52 @@ struct plx_font {
     struct psf2header header;
     u8 scale;
     u8 spacing;
-	u8 tabwidth;
+	u8 tab_width;
     u8* data;
     u32 data_size;
 };
 
-int plx_getstatus();
-void plx_hint(u32 hint);
-void plx_init();
-void plx_exit();
-void plx_getres(u32* x, u32* h);
-void plx_delay(u32 ms);
-void plx_color(u8 r, u8 g, u8 b);
-void plx_clear_color(u8 r, u8 g, u8 b);
-void plx_set_line_space(u16 space);
-void plx_swap_buffers();
+struct plx_fb {
+	u32 width;
+	u32 height;
+	int fd;
+	u64 size;
+	col_t* data;
+	col_t draw_color;
+	col_t clear_color;
+};
+
+struct plx_mousedata {
+	u32 x;
+	u32 y;
+	u8 left_click;
+	u8 right_click;
+};
+
+
+u8 plx_open(char* path, struct plx_fb* fb);
+void plx_close();
 void plx_load_font(const char* filename, struct plx_font* font);
 void plx_unload_font(struct plx_font* font);
 
-// Drawing
-void plx_draw_pixel(u32 x, u32 y);
-void plx_draw_rect(u32 x, u32 y, u32 w, u32 h);
-void plx_draw_rect_hollow(u32 x, u32 y, u32 w, u32 h, u32 tx, u32 ty);
-void plx_draw_line(u32 x0, u32 y0, u32 x1, u32 y1);
-void plx_draw_char(u32 x, u32 y, char c, struct plx_font* font);
-void plx_draw_text(u32 x, u32 y, char* text, u32 size, struct plx_font* font);
+void plx_clear         (struct plx_fb* fb);
+void plx_clear_region  (struct plx_fb* fb, u32 x, u32 y, u32 w, u32 h);
 
-// Input
-void plx_mouseinput(u32 flag, ...);
+void plx_draw_pixel    (struct plx_fb* fb, u32 x, u32 y);
+void plx_draw_region   (struct plx_fb* fb, u32 x, u32 y, u32 w, u32 h);
+void plx_draw_line     (struct plx_fb* fb, u32 x0, u32 y0, u32 x1, u32 y1);
+
+void plx_draw_char     (struct plx_fb* fb, u32 x, u32 y, char c, struct plx_font* font);
+void plx_draw_text     (struct plx_fb* fb, char* text, u32 size, u32 x, u32 y, struct plx_font* font);
+
 u8 plx_keyinput();
+void plx_delay(u32 ms);
+
+
+#define PLX_STDIN_NONBLOCK     (1<<0)
+// ...
+void plx_set_flag(u32 flag, u8 b);
+
+
 
 #endif
