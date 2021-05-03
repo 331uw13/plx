@@ -1,2 +1,3 @@
-# plx
-Framebuffer utils
+# FBDevU
+
+Utility to work with /dev/fb0
