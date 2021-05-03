@@ -41,14 +41,6 @@ struct plx_fb {
 	col_t clear_color;
 };
 
-struct plx_mousedata {
-	u32 x;
-	u32 y;
-	u8 left_click;
-	u8 right_click;
-};
-
-
 u8 plx_open(char* path, struct plx_fb* fb);
 void plx_close();
 void plx_load_font(const char* filename, struct plx_font* font);

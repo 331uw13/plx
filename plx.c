@@ -1,17 +1,11 @@
-
-// TODO: cleanup
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <assert.h>
-//#include <sys/epoll.h>
 #include <termios.h>
 #include <linux/fb.h>
 #include <linux/fs.h>
@@ -35,7 +29,6 @@ void memset_col(void* dest, col_t data, u32 count) {
 
 
 u8 plx_open(char* path, struct plx_fb* fb) {
-	assert(fb != NULL);
 	u8 res = 0;
 
     fb->fd = open(path, O_RDWR);
