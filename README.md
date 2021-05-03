@@ -1,3 +1,3 @@
 # FBDevU
 
-Utility to work with /dev/fb0
+Utility to work with linux framebuffer
